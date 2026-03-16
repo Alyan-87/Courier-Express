@@ -2,8 +2,6 @@
 
 A full-stack courier and parcel delivery management system with role-based workflows for customers, staff, and riders.
 
-For a concise portfolio/recruiter version, see [README.profile.md](README.profile.md).
-
 The project provides a complete logistics flow from parcel booking to delivery status updates, with secure authentication and a modern frontend dashboard.
 
 ## Table of Contents
