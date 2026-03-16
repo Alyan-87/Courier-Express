@@ -1,10 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from routers import auth, customer, staff, rider
 
-from config.database import engine
-from models.sql_models import Base
-from sqlalchemy import inspect
+from config.database import get_db
 import logging
 
 # Configure logging
@@ -50,17 +48,13 @@ def home():
 def health():
     return {"status": "ok", "service": "courier-backend"}
 
-@app.on_event("startup")
-def on_startup():
-    """Create DB tables at application startup if none exist."""
+
+@app.get("/health/db")
+def health_db(db=Depends(get_db)):
+    """Check MongoDB connectivity using ping command."""
     try:
-        inspector = inspect(engine)
-        existing = inspector.get_table_names()
-        if existing:
-            logger.info(f"Database already has {len(existing)} tables: {existing}. Skipping table creation.")
-        else:
-            logger.info("No existing tables found. Creating database tables...")
-            Base.metadata.create_all(bind=engine)
-            logger.info("Database tables created successfully")
+        db.command("ping")
+        return {"status": "ok", "database": "connected"}
     except Exception as exc:
-        logger.error(f"Failed to inspect/create DB tables on startup: {exc}")
+        logger.error(f"Database health check failed: {exc}")
+        raise HTTPException(status_code=503, detail="Database connection failed")

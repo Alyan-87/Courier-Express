@@ -1,10 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from schemas.pydantic_schemas import UserCreate, LoginRequest, UserOut, Token
-from models.sql_models import User
+from models.sql_models import user_document
 from utils.security import get_password_hash, create_access_token, verify_password
 from config.database import get_db
 import logging
-import traceback
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -30,36 +29,26 @@ def register(user: UserCreate, db=Depends(get_db)):
             raise HTTPException(400, "Invalid role. Must be customer, staff, or rider")
         
         # Check if email already exists
-        existing_user = db.query(User).filter(User.email == user.email).first()
+        existing_user = db["users"].find_one({"email": user.email})
         if existing_user:
             raise HTTPException(400, "Email already registered")
-        
-        # Hash password (get_password_hash handles long passwords via SHA-256 hashing)
+
+        # Hash password
         hashed = get_password_hash(user.password)
-        
-        new_user = User(
-            name=user.name,
-            email=user.email,
-            phone=user.phone,
-            password_hash=hashed,
-            role=user.role
-        )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-        # Return a dict instead of ORM object to avoid Pydantic serialization issues
+
+        new_user = user_document(user.name, user.email, user.phone, hashed, user.role)
+        result = db["users"].insert_one(new_user)
         return {
-            "user_id": new_user.user_id,
-            "name": new_user.name,
-            "email": new_user.email,
-            "role": new_user.role
+            "user_id": str(result.inserted_id),
+            "name": new_user["name"],
+            "email": new_user["email"],
+            "role": new_user["role"],
         }
     except HTTPException:
         raise
     except Exception as e:
         # Log full exception with traceback for debugging (server-side only)
         logger.exception("Registration error")
-        db.rollback()
         raise HTTPException(500, "Registration failed — server error")
 
 @router.post("/login", response_model=Token)
@@ -71,11 +60,11 @@ def login(user: LoginRequest, db=Depends(get_db)):
         if not user.password:
             raise HTTPException(400, "Password is required")
         
-        db_user = db.query(User).filter(User.email == user.email).first()
-        if not db_user or not verify_password(user.password, db_user.password_hash):
+        db_user = db["users"].find_one({"email": user.email})
+        if not db_user or not verify_password(user.password, db_user["password_hash"]):
             raise HTTPException(401, "Invalid email or password")
-        
-        token = create_access_token({"sub": db_user.email, "role": db_user.role})
+
+        token = create_access_token({"sub": db_user["email"], "role": db_user["role"]})
         return {"access_token": token, "token_type": "bearer"}
     except HTTPException:
         raise

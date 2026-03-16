@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from datetime import datetime
 from schemas.pydantic_schemas import ParcelCreate, ParcelOut
-from models.sql_models import Parcel, StatusHistory, User
+from models.sql_models import parcel_document, status_history_document
 from utils.security import decode_token
 from config.database import get_db
 import logging
@@ -36,16 +36,16 @@ def create_parcel(
     db=Depends(get_db)
 ):
     user_info = get_current_user(token)
-    
+
     # Validate user exists
-    db_user = db.query(User).filter(User.email == user_info["sub"]).first()
+    db_user = db["users"].find_one({"email": user_info["sub"]})
     if not db_user:
         raise HTTPException(404, "User not found")
-    
+
     # Validate weight
     if parcel.weight_kg <= 0:
         raise HTTPException(400, "Weight must be greater than 0")
-    
+
     # Validate receiver details
     if not parcel.receiver_name or not parcel.receiver_name.strip():
         raise HTTPException(400, "Receiver name is required")
@@ -55,41 +55,44 @@ def create_parcel(
         raise HTTPException(400, "Receiver address is required")
 
     charges = parcel.weight_kg * 50  # Rs.50 per kg
+    tracking_number = f"TRK{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    new_parcel = Parcel(
-        sender_id=db_user.user_id,
+    new_parcel = parcel_document(
+        tracking_number=tracking_number,
+        sender_id=str(db_user["_id"]),
         receiver_name=parcel.receiver_name,
         receiver_phone=parcel.receiver_phone,
         receiver_address=parcel.receiver_address,
         weight_kg=parcel.weight_kg,
         charges=charges,
-        tracking_number=f"TRK{datetime.now().strftime('%Y%m%d%H%M%S')}",
         current_status="booked"
     )
-    db.add(new_parcel)
-    db.commit()
-    db.refresh(new_parcel)
 
-    db.add(StatusHistory(parcel_id=new_parcel.parcel_id, status="booked"))
-    db.commit()
-
+    result = db["parcels"].insert_one(new_parcel)
+    db["status_history"].insert_one(status_history_document(parcel_id=str(result.inserted_id), status="booked"))
+    new_parcel["parcel_id"] = str(result.inserted_id)
     return new_parcel
 
 @router.get("/my-parcels")
 def get_my_parcels(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     """Get all parcels sent by the logged-in customer"""
     user_info = get_current_user(token)
-    
-    db_user = db.query(User).filter(User.email == user_info["sub"]).first()
+
+    db_user = db["users"].find_one({"email": user_info["sub"]})
     if not db_user:
         raise HTTPException(404, "User not found")
-    
-    parcels = db.query(Parcel).filter(Parcel.sender_id == db_user.user_id).all()
+
+    parcels = list(db["parcels"].find({"sender_id": str(db_user["_id"])}))
+    for p in parcels:
+        p["parcel_id"] = str(p["_id"])
+        p.pop("_id", None)
     return parcels
 
 @router.get("/parcel/track/{tracking_number}", response_model=ParcelOut)
 def track_parcel(tracking_number: str, db=Depends(get_db)):
-    parcel = db.query(Parcel).filter(Parcel.tracking_number == tracking_number).first()
+    parcel = db["parcels"].find_one({"tracking_number": tracking_number})
     if not parcel:
         raise HTTPException(404, "Parcel not found")
+    parcel["parcel_id"] = str(parcel["_id"])
+    parcel.pop("_id", None)
     return parcel

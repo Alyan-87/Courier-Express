@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
-from models.sql_models import DeliveryAssignment, Parcel, StatusHistory, User
+from models.sql_models import status_history_document
 from utils.security import decode_token
 from config.database import get_db
+from bson import ObjectId
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,49 +32,47 @@ def require_rider(token: str):
 def my_parcels(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     """Get all parcels assigned to the logged-in rider"""
     user = require_rider(token)
-    db_user = db.query(User).filter(User.email == user["sub"]).first()
-    
-    assignments = (
-        db.query(DeliveryAssignment)
-        .filter(DeliveryAssignment.rider_id == db_user.user_id)
-        .all()
-    )
-    
-    # Get full parcel details for each assignment
+
+    db_user = db["users"].find_one({"email": user["sub"]})
+    if not db_user:
+        raise HTTPException(404, "User not found")
+
+    assignments = list(db["delivery_assignments"].find({"rider_id": str(db_user["_id"])}))
+
     parcels = []
     for assignment in assignments:
-        parcel = db.query(Parcel).filter(Parcel.parcel_id == assignment.parcel_id).first()
+        parcel = db["parcels"].find_one({"_id": assignment["parcel_id"]})
         if parcel:
+            parcel["parcel_id"] = str(parcel["_id"])
+            parcel.pop("_id", None)
             parcels.append(parcel)
-    
+
     return parcels
 
 @router.put("/update-status/{parcel_id}")
-def update_status(parcel_id: int, new_status: str, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
+def update_status(parcel_id: str, new_status: str, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     require_rider(token)
-    
+
     # Validate parcel exists
-    parcel = db.query(Parcel).filter(Parcel.parcel_id == parcel_id).first()
+    parcel = db["parcels"].find_one({"_id": ObjectId(parcel_id)})
     if not parcel:
         raise HTTPException(404, "Parcel not found")
-    
+
     # Validate rider is assigned to this parcel
     user = require_rider(token)
-    db_user = db.query(User).filter(User.email == user["sub"]).first()
-    assignment = db.query(DeliveryAssignment).filter(
-        DeliveryAssignment.parcel_id == parcel_id,
-        DeliveryAssignment.rider_id == db_user.user_id
-    ).first()
+    db_user = db["users"].find_one({"email": user["sub"]})
+    assignment = db["delivery_assignments"].find_one(
+        {"parcel_id": ObjectId(parcel_id), "rider_id": str(db_user["_id"])}
+    )
     if not assignment:
         raise HTTPException(403, "You are not assigned to this parcel")
-    
+
     # Validate status value
     valid_statuses = ["booked", "packed", "in transit", "out for delivery", "delivered"]
     if new_status not in valid_statuses:
         raise HTTPException(400, f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
-    
-    parcel.current_status = new_status
-    db.add(parcel)
-    db.add(StatusHistory(parcel_id=parcel_id, status=new_status))
-    db.commit()
+
+    db["parcels"].update_one({"_id": ObjectId(parcel_id)}, {"$set": {"current_status": new_status}})
+    db["status_history"].insert_one(status_history_document(parcel_id=parcel_id, status=new_status))
+
     return {"message": f"Status updated to {new_status}"}

@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
-from models.sql_models import Parcel, DeliveryAssignment, User, StatusHistory
+from models.sql_models import parcel_document, delivery_assignment_document, status_history_document
 from schemas.pydantic_schemas import ParcelCreate, ParcelOut
 from utils.security import decode_token
 from config.database import get_db
 from datetime import datetime
+from bson import ObjectId
 import logging
 
 logger = logging.getLogger(__name__)
@@ -32,45 +33,51 @@ def require_staff(token: str):
 @router.get("/parcels")
 def get_all_parcels(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     require_staff(token)
-    return db.query(Parcel).all()
+    parcels = list(db["parcels"].find())
+    for p in parcels:
+        p["parcel_id"] = str(p["_id"])
+        p.pop("_id", None)
+    return parcels
 
 @router.get("/parcel/{parcel_id}")
-def get_parcel_by_id(parcel_id: int, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
+def get_parcel_by_id(parcel_id: str, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     require_staff(token)
-    parcel = db.query(Parcel).filter(Parcel.parcel_id == parcel_id).first()
+    parcel = db["parcels"].find_one({"_id": ObjectId(parcel_id)})
     if not parcel:
         raise HTTPException(404, "Parcel not found")
+    parcel["parcel_id"] = str(parcel["_id"])
+    parcel.pop("_id", None)
     return parcel
 
 @router.get("/riders")
 def get_all_riders(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     """Get list of all riders for assignment"""
     require_staff(token)
-    riders = db.query(User).filter(User.role == "rider").all()
-    return [{"user_id": r.user_id, "name": r.name, "email": r.email, "phone": r.phone} for r in riders]
+    riders = list(db["users"].find({"role": "rider"}))
+    return [{"user_id": str(r["_id"]), "name": r["name"], "email": r["email"], "phone": r.get("phone")} for r in riders]
 
 @router.post("/assign-rider")
-def assign_rider(parcel_id: int, rider_id: int, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
+def assign_rider(parcel_id: str, rider_id: str, token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     require_staff(token)
-    
+
     # Validate parcel exists
-    parcel = db.query(Parcel).filter(Parcel.parcel_id == parcel_id).first()
+    parcel = db["parcels"].find_one({"_id": ObjectId(parcel_id)})
     if not parcel:
         raise HTTPException(404, "Parcel not found")
-    
+
     # Validate rider exists and is a rider
-    rider = db.query(User).filter(User.user_id == rider_id, User.role == "rider").first()
+    rider = db["users"].find_one({"_id": ObjectId(rider_id), "role": "rider"})
     if not rider:
         raise HTTPException(404, "Rider not found")
-    
+
     # Check if already assigned
-    existing = db.query(DeliveryAssignment).filter(DeliveryAssignment.parcel_id == parcel_id).first()
+    existing = db["delivery_assignments"].find_one({"parcel_id": ObjectId(parcel_id)})
     if existing:
         raise HTTPException(400, "Parcel already assigned to a rider")
-    
-    assignment = DeliveryAssignment(parcel_id=parcel_id, rider_id=rider_id)
-    db.add(assignment)
-    db.commit()
+
+    assignment = delivery_assignment_document(parcel_id=ObjectId(parcel_id), rider_id=str(rider["_id"]))
+    db["delivery_assignments"].insert_one(assignment)
+
     return {"message": "Rider assigned successfully!"}
 
 @router.post("/parcel/create", response_model=ParcelOut)
@@ -82,16 +89,16 @@ def create_parcel_as_staff(
 ):
     """Staff can create parcels on behalf of customers"""
     require_staff(token)
-    
+
     # Find the customer by email
-    customer = db.query(User).filter(User.email == customer_email, User.role == "customer").first()
+    customer = db["users"].find_one({"email": customer_email, "role": "customer"})
     if not customer:
         raise HTTPException(404, f"Customer with email '{customer_email}' not found")
-    
+
     # Validate weight
     if parcel.weight_kg <= 0:
         raise HTTPException(400, "Weight must be greater than 0")
-    
+
     # Validate receiver details
     if not parcel.receiver_name or not parcel.receiver_name.strip():
         raise HTTPException(400, "Receiver name is required")
@@ -101,50 +108,43 @@ def create_parcel_as_staff(
         raise HTTPException(400, "Receiver address is required")
 
     charges = parcel.weight_kg * 50  # Rs.50 per kg
+    tracking_number = f"TRK{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    new_parcel = Parcel(
-        sender_id=customer.user_id,
+    new_parcel = parcel_document(
+        tracking_number=tracking_number,
+        sender_id=str(customer["_id"]),
         receiver_name=parcel.receiver_name,
         receiver_phone=parcel.receiver_phone,
         receiver_address=parcel.receiver_address,
         weight_kg=parcel.weight_kg,
         charges=charges,
-        tracking_number=f"TRK{datetime.now().strftime('%Y%m%d%H%M%S')}",
         current_status="booked"
     )
-    db.add(new_parcel)
-    db.commit()
-    db.refresh(new_parcel)
-    
-    # Add status history
-    status_entry = StatusHistory(
-        parcel_id=new_parcel.parcel_id,
-        status="booked"
-    )
-    db.add(status_entry)
-    db.commit()
-    
+
+    result = db["parcels"].insert_one(new_parcel)
+    db["status_history"].insert_one(status_history_document(parcel_id=str(result.inserted_id), status="booked"))
+    new_parcel["parcel_id"] = str(result.inserted_id)
     return new_parcel
 
 @router.put("/parcel/{parcel_id}", response_model=ParcelOut)
 def update_parcel(
-    parcel_id: int,
+    parcel_id: str,
     parcel: ParcelCreate,
     token: str = Depends(oauth2_scheme),
     db=Depends(get_db)
 ):
     """Staff can update/edit parcel details"""
     require_staff(token)
-    
+
     # Find the parcel
-    db_parcel = db.query(Parcel).filter(Parcel.parcel_id == parcel_id).first()
+    db_parcel = db["parcels"].find_one({"_id": ObjectId(parcel_id)})
     if not db_parcel:
         raise HTTPException(404, "Parcel not found")
-    
+
     # Validate weight
     if parcel.weight_kg <= 0:
         raise HTTPException(400, "Weight must be greater than 0")
-    
+
     # Validate receiver details
     if not parcel.receiver_name or not parcel.receiver_name.strip():
         raise HTTPException(400, "Receiver name is required")
@@ -152,23 +152,25 @@ def update_parcel(
         raise HTTPException(400, "Receiver phone is required")
     if not parcel.receiver_address or not parcel.receiver_address.strip():
         raise HTTPException(400, "Receiver address is required")
-    
-    # Update parcel details
-    db_parcel.receiver_name = parcel.receiver_name
-    db_parcel.receiver_phone = parcel.receiver_phone
-    db_parcel.receiver_address = parcel.receiver_address
-    db_parcel.weight_kg = parcel.weight_kg
-    db_parcel.charges = parcel.weight_kg * 50  # Recalculate charges
-    
-    db.commit()
-    db.refresh(db_parcel)
-    
-    # Add status history for the update
-    status_entry = StatusHistory(
-        parcel_id=db_parcel.parcel_id,
-        status=db_parcel.current_status
+
+    db["parcels"].update_one(
+        {"_id": ObjectId(parcel_id)},
+        {
+            "$set": {
+                "receiver_name": parcel.receiver_name,
+                "receiver_phone": parcel.receiver_phone,
+                "receiver_address": parcel.receiver_address,
+                "weight_kg": parcel.weight_kg,
+                "charges": parcel.weight_kg * 50,
+            }
+        },
     )
-    db.add(status_entry)
-    db.commit()
-    
-    return db_parcel
+
+    # Add status history for the update
+    db["status_history"].insert_one(
+        status_history_document(parcel_id=parcel_id, status=db_parcel.get("current_status", "booked"))
+    )
+    updated_parcel = db["parcels"].find_one({"_id": ObjectId(parcel_id)})
+    updated_parcel["parcel_id"] = str(updated_parcel["_id"])
+    updated_parcel.pop("_id", None)
+    return updated_parcel

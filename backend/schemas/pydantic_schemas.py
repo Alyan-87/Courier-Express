@@ -15,7 +15,7 @@ class LoginRequest(BaseModel):
     role: Optional[str] = None
 
 class UserOut(BaseModel):
-    user_id: int
+    user_id: str
     name: str
     email: str
     role: str
@@ -34,16 +34,16 @@ class ParcelCreate(BaseModel):
     weight_kg: float
 
 class AssignRiderRequest(BaseModel):
-    parcel_id: int
-    rider_id: int
+    parcel_id: str
+    rider_id: str
 
 class UpdateStatusRequest(BaseModel):
     new_status: str
 
 class ParcelOut(BaseModel):
-    parcel_id: int
+    parcel_id: str
     tracking_number: str
-    sender_id: int
+    sender_id: str
     receiver_name: str
     receiver_phone: str
     receiver_address: str

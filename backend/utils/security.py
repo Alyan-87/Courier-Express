@@ -10,19 +10,12 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 def get_password_hash(password: str):
-    # Bcrypt accepts at most 72 bytes. To be safe, truncate at 50 characters
-    # which is guaranteed to be under 72 bytes in UTF-8.
-    if len(password) > 50:
-        password = password[:50]
     return pwd_context.hash(password)
 
 def verify_password(plain: str, hashed: str):
-    # Truncate to match hashing behavior
-    if len(plain) > 50:
-        plain = plain[:50]
     return pwd_context.verify(plain, hashed)
 
 def create_access_token(data: dict):

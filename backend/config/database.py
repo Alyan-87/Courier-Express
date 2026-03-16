@@ -1,23 +1,14 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+from pymongo import MongoClient
 import os
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-# Ensure SSL when connecting to hosted Postgres (e.g., Supabase). If the
-# DATABASE_URL provider requires SSL, pass the appropriate connect_args.
-connect_args = {}
-if DATABASE_URL and DATABASE_URL.startswith("postgresql"):
-    connect_args = {"sslmode": "require"}
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017/")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "courier_express")
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+client = MongoClient(MONGO_URL)
+db = client[MONGO_DB_NAME]
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    return db
